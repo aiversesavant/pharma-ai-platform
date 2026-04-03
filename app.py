@@ -1,17 +1,13 @@
+from __future__ import annotations
+
 import hashlib
+import os
+from typing import Any, Dict, List, Optional, TypedDict, cast
 
 import streamlit as st
 
-from router import (
-    detect_route,
-    get_route_description,
-    get_route_label,
-)
-from services.audit_logger import (
-    clear_audit_events,
-    log_audit_event,
-    read_audit_events,
-)
+from router import detect_route, get_route_description, get_route_label
+from services.audit_logger import clear_audit_events, log_audit_event, read_audit_events
 from services.document_registry import (
     filter_prepared_files,
     get_prepared_file_by_name,
@@ -22,13 +18,9 @@ from services.document_registry import (
     remove_prepared_file,
     reset_prepared_files,
 )
-from services.engine_prep import (
-    prepare_all_engines,
-    prepare_complibot,
-    prepare_pharmarag,
-)
+from services.engine_prep import prepare_all_engines, prepare_complibot, prepare_pharmarag
 from services.llm_config import llm_status_summary
-from services.platform_health import get_platform_health, get_deployment_readiness_items
+from services.platform_health import get_deployment_readiness_items, get_platform_health
 from services.review_queue import (
     clear_review_items,
     create_review_item,
@@ -66,9 +58,145 @@ from modules.pharmarag_module import query_documents
 from modules.pharmasummarizer_module import run_pharmasummarizer_from_path
 
 
+SHOW_DEBUG_PANELS = os.getenv("SHOW_DEBUG_PANELS", "false").lower() == "true"
+
+
+class PreparedFile(TypedDict, total=False):
+    name: str
+    document_version: str
+    category: str
+    modified_at: str
+    size_kb: float
+
+
+class PrepResult(TypedDict, total=False):
+    ok: bool
+    ready: bool
+    status: str
+    details: str
+    results: Dict[str, Any]
+
+
+class EngineRunResult(TypedDict, total=False):
+    error: str
+    trace_id: str
+    document_version: str
+
+
 def build_output_trace_id(route: str, source: str, version: str, user_input: str = "") -> str:
     raw = f"{route}|{source}|{version}|{user_input}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _safe_name_list(items: List[Dict[str, Any]]) -> List[str]:
+    return [str(item.get("name")) for item in items if item and item.get("name")]
+
+
+def _get_last_status_from_prep(prep_result: Dict[str, Any]) -> str:
+    return str(prep_result.get("details") or prep_result.get("status") or "")
+
+
+def _result_indicates_error(
+    result: Optional[Dict[str, Any]],
+    primary_text_keys: Optional[List[str]] = None,
+) -> bool:
+    if not isinstance(result, dict):
+        return True
+
+    if result.get("error"):
+        return True
+
+    for key in primary_text_keys or []:
+        value = str(result.get(key, "")).strip().lower()
+        if value.startswith("error:"):
+            return True
+
+    return False
+
+
+def _safe_detect_route(user_input: str, selected_mode: str, prepared_file_count: int) -> str:
+    try:
+        return detect_route(
+            user_input=user_input,
+            selected_mode=selected_mode,
+            prepared_file_count=prepared_file_count,
+        )
+    except Exception:
+        if selected_mode == "PharmaSummarizer":
+            return "pharmasummarizer"
+        if selected_mode == "PharmaRAG":
+            return "pharmarag"
+        if selected_mode == "CompliBot":
+            return "complibot"
+        return "pharmasummarizer"
+
+
+def _attach_result_metadata(
+    result: Dict[str, Any],
+    *,
+    route: str,
+    source: str,
+    version: str,
+    user_input: str = "",
+) -> Dict[str, Any]:
+    result["trace_id"] = build_output_trace_id(
+        route=route,
+        source=source,
+        version=version,
+        user_input=user_input,
+    )
+    result["document_version"] = version
+    return result
+
+
+def _log_prepare_event(
+    *,
+    event_type: str,
+    module: str,
+    prep_result: Dict[str, Any],
+    selected_documents: List[str],
+    route: Optional[str] = None,
+) -> None:
+    log_audit_event(
+        event_type=event_type,
+        status="success" if prep_result.get("ok") else "warning",
+        details={
+            "selected_documents": selected_documents,
+            "ready": prep_result.get("ready"),
+            "status": prep_result.get("status"),
+        },
+        actor="local_user",
+        module=module,
+        route=route,
+    )
+    refresh_audit_log_view()
+
+
+def _log_run_event(
+    *,
+    event_type: str,
+    module: str,
+    route: str,
+    status: str,
+    details: Dict[str, Any],
+    target_file: Optional[str] = None,
+    review_status: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    document_version: Optional[str] = None,
+) -> None:
+    log_audit_event(
+        event_type=event_type,
+        status=status,
+        details=details,
+        actor="local_user",
+        module=module,
+        route=route,
+        target_file=target_file,
+        review_status=review_status,
+        trace_id=trace_id,
+        document_version=document_version,
+    )
+    refresh_audit_log_view()
 
 
 st.set_page_config(page_title="PharmaAI Platform", page_icon="💊", layout="wide")
@@ -76,16 +204,16 @@ st.set_page_config(page_title="PharmaAI Platform", page_icon="💊", layout="wid
 initialize_session_state()
 
 st.title("💊 PharmaAI Platform")
-st.markdown(
-    "A unified workspace for pharma/regulatory Q&A, document summarization, and compliance/SOP assistance."
+st.caption(
+    "A unified workspace for pharma/regulatory Q&A, document summarization, and compliance assistance."
 )
 
-llm_status = llm_status_summary()
-render_llm_status_panel(llm_status)
-
-health = get_platform_health()
-deployment_readiness = get_deployment_readiness_items()
-render_platform_health_panel(health, deployment_readiness)
+if SHOW_DEBUG_PANELS:
+    render_llm_status_panel(llm_status_summary())
+    render_platform_health_panel(
+        get_platform_health(),
+        get_deployment_readiness_items(),
+    )
 
 with st.sidebar:
     st.header("Prepare Documents")
@@ -128,12 +256,12 @@ with st.sidebar:
                     status="success",
                     details={
                         "saved_file_count": len(manifests),
-                        "saved_files": [item["name"] for item in manifests],
+                        "saved_files": _safe_name_list(manifests),
                     },
                     actor="local_user",
                     module="document_registry",
                 )
-                refresh_audit_log_view()
+            refresh_audit_log_view()
 
     with reset_col:
         if st.button("Reset Files"):
@@ -170,7 +298,7 @@ with st.sidebar:
     render_document_history_header(prepared_docs)
     render_document_history_table(prepared_docs)
 
-    visible_file_names = [item["name"] for item in prepared_docs]
+    visible_file_names = _safe_name_list(prepared_docs)
 
     st.subheader("Select Source Documents")
     st.caption("Optional. Leave empty to prepare all currently visible filtered documents.")
@@ -180,7 +308,9 @@ with st.sidebar:
             "Choose documents for preparation and task scope",
             options=visible_file_names,
             default=[
-                name for name in st.session_state.selected_source_docs if name in visible_file_names
+                name
+                for name in st.session_state.selected_source_docs
+                if name in visible_file_names
             ],
         )
         st.session_state.selected_source_docs = selected_docs
@@ -190,7 +320,6 @@ with st.sidebar:
 
     if visible_file_names:
         st.markdown("**Remove a document**")
-
         remove_options = ["-- Select a file to remove --"] + visible_file_names
         remove_name = st.selectbox(
             "Select prepared file to remove",
@@ -209,6 +338,7 @@ with st.sidebar:
                     actor="local_user",
                     module="document_registry",
                 )
+                refresh_audit_log_view()
             else:
                 removed = remove_prepared_file(remove_name)
                 if removed:
@@ -223,7 +353,9 @@ with st.sidebar:
 
                     if remove_name in st.session_state.selected_source_docs:
                         st.session_state.selected_source_docs = [
-                            name for name in st.session_state.selected_source_docs if name != remove_name
+                            name
+                            for name in st.session_state.selected_source_docs
+                            if name != remove_name
                         ]
 
                     st.success(f"Removed {remove_name}")
@@ -247,6 +379,7 @@ with st.sidebar:
                         module="document_registry",
                         target_file=remove_name,
                     )
+                    refresh_audit_log_view()
 
     st.subheader("Prepare Engines")
 
@@ -259,52 +392,40 @@ with st.sidebar:
 
     if st.button("Prepare PharmaRAG"):
         prep_result = prepare_pharmarag(selected_file_paths)
-
-        st.session_state.last_status = prep_result["details"] or prep_result["status"]
-        st.session_state.rag_ready = prep_result["ready"]
-
+        st.session_state.last_status = _get_last_status_from_prep(prep_result)
+        st.session_state.rag_ready = bool(prep_result.get("ready", False))
         render_engine_prep_result(prep_result)
-        log_audit_event(
+        _log_prepare_event(
             event_type="prepare_pharmarag",
-            status="success" if prep_result.get("ok") else "warning",
-            details={
-                "selected_documents": effective_source_docs,
-                "ready": prep_result.get("ready"),
-                "status": prep_result.get("status"),
-            },
-            actor="local_user",
             module="pharmarag",
+            prep_result=prep_result,
+            selected_documents=effective_source_docs,
             route="pharmarag",
         )
-        refresh_audit_log_view()
 
     if st.button("Prepare CompliBot"):
         prep_result = prepare_complibot(selected_file_paths)
-
-        st.session_state.last_status = prep_result["details"] or prep_result["status"]
-        st.session_state.complibot_ready = prep_result["ready"]
-
+        st.session_state.last_status = _get_last_status_from_prep(prep_result)
+        st.session_state.complibot_ready = bool(prep_result.get("ready", False))
         render_engine_prep_result(prep_result)
-        log_audit_event(
+        _log_prepare_event(
             event_type="prepare_complibot",
-            status="success" if prep_result.get("ok") else "warning",
-            details={
-                "selected_documents": effective_source_docs,
-                "ready": prep_result.get("ready"),
-                "status": prep_result.get("status"),
-            },
-            actor="local_user",
             module="complibot",
+            prep_result=prep_result,
+            selected_documents=effective_source_docs,
             route="complibot",
         )
-        refresh_audit_log_view()
 
     if st.button("Prepare All"):
         prep_result = prepare_all_engines(selected_file_paths)
+        st.session_state.last_status = _get_last_status_from_prep(prep_result)
 
-        st.session_state.last_status = prep_result["details"] or prep_result["status"]
-        st.session_state.rag_ready = prep_result["results"]["pharmarag"]["ready"]
-        st.session_state.complibot_ready = prep_result["results"]["complibot"]["ready"]
+        results = prep_result.get("results", {}) or {}
+        rag_result = results.get("pharmarag", {}) or {}
+        complibot_result = results.get("complibot", {}) or {}
+
+        st.session_state.rag_ready = bool(rag_result.get("ready", False))
+        st.session_state.complibot_ready = bool(complibot_result.get("ready", False))
 
         render_prepare_all_result(prep_result)
         log_audit_event(
@@ -312,8 +433,8 @@ with st.sidebar:
             status="success" if prep_result.get("ok") else "warning",
             details={
                 "selected_documents": effective_source_docs,
-                "rag_ready": prep_result["results"]["pharmarag"]["ready"],
-                "complibot_ready": prep_result["results"]["complibot"]["ready"],
+                "rag_ready": rag_result.get("ready", False),
+                "complibot_ready": complibot_result.get("ready", False),
                 "status": prep_result.get("status"),
             },
             actor="local_user",
@@ -346,6 +467,7 @@ left_col, right_col = st.columns([2, 1])
 
 with left_col:
     st.subheader("Choose Task")
+
     mode = st.selectbox(
         "Task Mode",
         ["Auto", "PharmaRAG", "PharmaSummarizer", "CompliBot"],
@@ -362,14 +484,14 @@ with left_col:
         height=160,
     )
 
-    all_file_names = [item["name"] for item in all_prepared_docs]
+    all_file_names = _safe_name_list(all_prepared_docs)
     summarizer_file_path = None
     selected_summary_manifest = None
 
     if all_file_names:
         summary_options = ["-- Select a file to summarize --"] + all_file_names
-
         default_index = 0
+
         if (
             st.session_state.selected_summary_file
             and st.session_state.selected_summary_file in all_file_names
@@ -384,11 +506,12 @@ with left_col:
 
         if selected_summary_file == "-- Select a file to summarize --":
             st.session_state.selected_summary_file = None
-            summarizer_file_path = None
         else:
             st.session_state.selected_summary_file = selected_summary_file
             summarizer_file_path = prepared_file_map.get(selected_summary_file)
             selected_summary_manifest = get_prepared_file_by_name(selected_summary_file)
+    else:
+        st.session_state.selected_summary_file = None
 
     create_review = st.checkbox("Create review item for this output")
     run_clicked = st.button("Run")
@@ -437,7 +560,7 @@ if run_clicked:
         )
         refresh_audit_log_view()
     else:
-        route = detect_route(
+        route = _safe_detect_route(
             user_input=user_input,
             selected_mode=mode,
             prepared_file_count=prepared_file_count,
@@ -452,26 +575,30 @@ if run_clicked:
         if route == "pharmasummarizer":
             if not summarizer_file_path:
                 st.warning("Please select a file to summarize.")
-                log_audit_event(
+                _log_run_event(
                     event_type="run_pharmasummarizer",
-                    status="warning",
-                    details={"reason": "no_summary_file_selected"},
-                    actor="local_user",
                     module="pharmasummarizer",
                     route="pharmasummarizer",
+                    status="warning",
+                    details={"reason": "no_summary_file_selected"},
                 )
             else:
                 result = run_pharmasummarizer_from_path(summarizer_file_path)
+                if not isinstance(result, dict):
+                    result = {"error": "Unexpected summarizer response format."}
+
                 if selected_summary_manifest:
-                    result["trace_id"] = build_output_trace_id(
+                    result = _attach_result_metadata(
+                        result,
                         route="pharmasummarizer",
                         source=selected_summary_manifest.get("name", ""),
                         version=selected_summary_manifest.get("document_version", ""),
                     )
-                    result["document_version"] = selected_summary_manifest.get("document_version", "")
-                render_summarizer_result(result)
 
-                if create_review and "error" not in result:
+                render_summarizer_result(result, show_debug=SHOW_DEBUG_PANELS)
+                has_error = _result_indicates_error(result)
+
+                if create_review and not has_error:
                     review_item = create_review_item(
                         item_type="summary_output",
                         title=result.get("title", "Document Summary Review"),
@@ -487,58 +614,62 @@ if run_clicked:
                     st.success(f"Review item created: {review_item['review_id']}")
                     refresh_review_queue_view()
 
-                log_audit_event(
+                _log_run_event(
                     event_type="run_pharmasummarizer",
-                    status="success" if "error" not in result else "error",
+                    module="pharmasummarizer",
+                    route="pharmasummarizer",
+                    status="success" if not has_error else "error",
                     details={
                         "selected_file": st.session_state.selected_summary_file,
                         "summary_mode": result.get("summary_mode"),
                         "document_type": result.get("document_type"),
-                        "review_item_created": bool(create_review and "error" not in result),
+                        "review_item_created": bool(create_review and not has_error),
                     },
-                    actor="local_user",
-                    module="pharmasummarizer",
-                    route="pharmasummarizer",
                     target_file=st.session_state.selected_summary_file,
-                    review_status="pending_review" if create_review and "error" not in result else None,
+                    review_status="pending_review" if create_review and not has_error else None,
                     trace_id=result.get("trace_id"),
                     document_version=result.get("document_version"),
                 )
-            refresh_audit_log_view()
 
         elif route == "pharmarag":
             if not st.session_state.rag_ready:
-                st.warning("PharmaRAG is not prepared yet. Select documents if needed, then click 'Prepare PharmaRAG' or 'Prepare All'.")
-                log_audit_event(
+                st.warning(
+                    "PharmaRAG is not prepared yet. Select documents if needed, then click "
+                    "'Prepare PharmaRAG' or 'Prepare All'."
+                )
+                _log_run_event(
                     event_type="run_pharmarag",
-                    status="warning",
-                    details={"reason": "pharmarag_not_prepared"},
-                    actor="local_user",
                     module="pharmarag",
                     route="pharmarag",
+                    status="warning",
+                    details={"reason": "pharmarag_not_prepared"},
                 )
             elif not user_input.strip():
                 st.warning("Please enter a question for PharmaRAG.")
-                log_audit_event(
+                _log_run_event(
                     event_type="run_pharmarag",
-                    status="warning",
-                    details={"reason": "empty_question"},
-                    actor="local_user",
                     module="pharmarag",
                     route="pharmarag",
+                    status="warning",
+                    details={"reason": "empty_question"},
                 )
             else:
                 result = query_documents(user_input, top_k=3)
-                result["trace_id"] = build_output_trace_id(
+                if not isinstance(result, dict):
+                    result = {"summary": "Error: Unexpected PharmaRAG response format."}
+
+                result = _attach_result_metadata(
+                    result,
                     route="pharmarag",
                     source=result.get("primary_citation", ""),
                     version="retrieval-context",
                     user_input=user_input,
                 )
-                result["document_version"] = "retrieval-context"
-                render_rag_result(result)
 
-                if create_review and not str(result.get("summary", "")).startswith("Error:"):
+                render_rag_result(result, show_debug=SHOW_DEBUG_PANELS)
+                has_error = _result_indicates_error(result, primary_text_keys=["summary"])
+
+                if create_review and not has_error:
                     review_item = create_review_item(
                         item_type="rag_answer_review",
                         title="PharmaRAG Answer Review",
@@ -554,58 +685,65 @@ if run_clicked:
                     st.success(f"Review item created: {review_item['review_id']}")
                     refresh_review_queue_view()
 
-                log_audit_event(
+                _log_run_event(
                     event_type="run_pharmarag",
-                    status="success" if not str(result.get("summary", "")).startswith("Error:") else "error",
+                    module="pharmarag",
+                    route="pharmarag",
+                    status="success" if not has_error else "error",
                     details={
                         "question": user_input,
                         "answer_mode": result.get("answer_mode"),
                         "primary_citation": result.get("primary_citation"),
-                        "review_item_created": bool(create_review and not str(result.get("summary", "")).startswith("Error:")),
+                        "review_item_created": bool(create_review and not has_error),
                     },
-                    actor="local_user",
-                    module="pharmarag",
-                    route="pharmarag",
                     target_file=result.get("primary_citation"),
-                    review_status="pending_review" if create_review and not str(result.get("summary", "")).startswith("Error:") else None,
+                    review_status="pending_review" if create_review and not has_error else None,
                     trace_id=result.get("trace_id"),
                     document_version=result.get("document_version"),
                 )
-            refresh_audit_log_view()
 
         elif route == "complibot":
             if not st.session_state.complibot_ready:
-                st.warning("CompliBot is not prepared yet. Select documents if needed, then click 'Prepare CompliBot' or 'Prepare All'.")
-                log_audit_event(
+                st.warning(
+                    "CompliBot is not prepared yet. Select documents if needed, then click "
+                    "'Prepare CompliBot' or 'Prepare All'."
+                )
+                _log_run_event(
                     event_type="run_complibot",
-                    status="warning",
-                    details={"reason": "complibot_not_prepared"},
-                    actor="local_user",
                     module="complibot",
                     route="complibot",
+                    status="warning",
+                    details={"reason": "complibot_not_prepared"},
                 )
             elif not user_input.strip():
                 st.warning("Please enter a question for CompliBot.")
-                log_audit_event(
+                _log_run_event(
                     event_type="run_complibot",
-                    status="warning",
-                    details={"reason": "empty_question"},
-                    actor="local_user",
                     module="complibot",
                     route="complibot",
+                    status="warning",
+                    details={"reason": "empty_question"},
                 )
             else:
                 result = run_complibot(user_input, top_k=4)
-                result["trace_id"] = build_output_trace_id(
+                if not isinstance(result, dict):
+                    result = {"error": "Unexpected CompliBot response format."}
+
+                result = _attach_result_metadata(
+                    result,
                     route="complibot",
                     source=result.get("source", ""),
                     version="retrieval-context",
                     user_input=user_input,
                 )
-                result["document_version"] = "retrieval-context"
-                render_complibot_result(result)
 
-                if create_review:
+                render_complibot_result(result, show_debug=SHOW_DEBUG_PANELS)
+                has_error = _result_indicates_error(
+                    result,
+                    primary_text_keys=["answer_summary", "procedure_guidance"],
+                )
+
+                if create_review and not has_error:
                     review_item = create_review_item(
                         item_type="compliance_answer_review",
                         title="CompliBot Answer Review",
@@ -621,24 +759,22 @@ if run_clicked:
                     st.success(f"Review item created: {review_item['review_id']}")
                     refresh_review_queue_view()
 
-                log_audit_event(
+                _log_run_event(
                     event_type="run_complibot",
-                    status="success",
+                    module="complibot",
+                    route="complibot",
+                    status="success" if not has_error else "error",
                     details={
                         "question": user_input,
                         "answer_mode": result.get("answer_mode"),
                         "primary_source": result.get("source"),
-                        "review_item_created": bool(create_review),
+                        "review_item_created": bool(create_review and not has_error),
                     },
-                    actor="local_user",
-                    module="complibot",
-                    route="complibot",
                     target_file=result.get("source"),
-                    review_status="pending_review" if create_review else None,
+                    review_status="pending_review" if create_review and not has_error else None,
                     trace_id=result.get("trace_id"),
                     document_version=result.get("document_version"),
                 )
-            refresh_audit_log_view()
 
 st.divider()
 
@@ -716,14 +852,15 @@ with bottom_right:
         ]
 
     if decision_source_items:
-        review_options = ["-- Select a review item --"] + [
-            f"{item.get('review_id')} | {item.get('title')} | {item.get('status')}"
+        review_option_map = {
+            f"{item.get('review_id', 'unknown')} | {item.get('title', 'Untitled')} | {item.get('status', 'unknown')}":
+            str(item.get("review_id", "unknown"))
             for item in decision_source_items
-        ]
+        }
 
         selected_review_option = st.selectbox(
             "Select review item",
-            options=review_options,
+            options=["-- Select a review item --"] + list(review_option_map.keys()),
             index=0,
         )
 
@@ -740,66 +877,72 @@ with bottom_right:
                 if selected_review_option == "-- Select a review item --":
                     st.warning("Please select a review item first.")
                 else:
-                    selected_review_id = selected_review_option.split(" | ")[0]
-                    updated = update_review_item_status(
-                        review_id=selected_review_id,
-                        new_status="approved",
-                        reviewed_by="local_reviewer",
-                        decision_note=decision_note,
-                    )
-                    if updated:
-                        st.success("Review item approved.")
-                        log_audit_event(
-                            event_type="review_item_approved",
-                            status="success",
-                            details={
-                                "review_id": selected_review_id,
-                                "decision_note": decision_note,
-                            },
-                            actor="local_reviewer",
-                            module="review_queue",
-                            review_status="approved",
-                            trace_id=updated.get("trace_id"),
-                            document_version=updated.get("document_version"),
-                        )
-                        refresh_review_queue_view()
-                        refresh_audit_log_view()
-                        st.rerun()
+                    selected_review_id = review_option_map.get(selected_review_option)
+                    if not selected_review_id:
+                        st.error("Could not determine the selected review item.")
                     else:
-                        st.error("Could not approve the selected review item.")
+                        updated = update_review_item_status(
+                            review_id=selected_review_id,
+                            new_status="approved",
+                            reviewed_by="local_reviewer",
+                            decision_note=decision_note,
+                        )
+                        if updated:
+                            st.success("Review item approved.")
+                            log_audit_event(
+                                event_type="review_item_approved",
+                                status="success",
+                                details={
+                                    "review_id": selected_review_id,
+                                    "decision_note": decision_note,
+                                },
+                                actor="local_reviewer",
+                                module="review_queue",
+                                review_status="approved",
+                                trace_id=updated.get("trace_id"),
+                                document_version=updated.get("document_version"),
+                            )
+                            refresh_review_queue_view()
+                            refresh_audit_log_view()
+                            st.rerun()
+                        else:
+                            st.error("Could not approve the selected review item.")
 
         with review_action_cols[1]:
             if st.button("Reject Review Item"):
                 if selected_review_option == "-- Select a review item --":
                     st.warning("Please select a review item first.")
                 else:
-                    selected_review_id = selected_review_option.split(" | ")[0]
-                    updated = update_review_item_status(
-                        review_id=selected_review_id,
-                        new_status="rejected",
-                        reviewed_by="local_reviewer",
-                        decision_note=decision_note,
-                    )
-                    if updated:
-                        st.success("Review item rejected.")
-                        log_audit_event(
-                            event_type="review_item_rejected",
-                            status="success",
-                            details={
-                                "review_id": selected_review_id,
-                                "decision_note": decision_note,
-                            },
-                            actor="local_reviewer",
-                            module="review_queue",
-                            review_status="rejected",
-                            trace_id=updated.get("trace_id"),
-                            document_version=updated.get("document_version"),
-                        )
-                        refresh_review_queue_view()
-                        refresh_audit_log_view()
-                        st.rerun()
+                    selected_review_id = review_option_map.get(selected_review_option)
+                    if not selected_review_id:
+                        st.error("Could not determine the selected review item.")
                     else:
-                        st.error("Could not reject the selected review item.")
+                        updated = update_review_item_status(
+                            review_id=selected_review_id,
+                            new_status="rejected",
+                            reviewed_by="local_reviewer",
+                            decision_note=decision_note,
+                        )
+                        if updated:
+                            st.success("Review item rejected.")
+                            log_audit_event(
+                                event_type="review_item_rejected",
+                                status="success",
+                                details={
+                                    "review_id": selected_review_id,
+                                    "decision_note": decision_note,
+                                },
+                                actor="local_reviewer",
+                                module="review_queue",
+                                review_status="rejected",
+                                trace_id=updated.get("trace_id"),
+                                document_version=updated.get("document_version"),
+                            )
+                            refresh_review_queue_view()
+                            refresh_audit_log_view()
+                            st.rerun()
+                        else:
+                            st.error("Could not reject the selected review item.")
     else:
         st.caption("No review items available for the current filters and decision settings.")
 

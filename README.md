@@ -1,3 +1,15 @@
+---
+title: PharmaAI Platform
+emoji: 💊
+colorFrom: blue
+colorTo: green
+sdk: streamlit
+sdk_version: "1.39.0"
+python_version: "3.11"
+app_file: app.py
+pinned: false
+---
+
 # 💊 PharmaAI Platform
 
 PharmaAI Platform is a unified AI-assisted document intelligence workspace for pharmaceutical, regulatory, and compliance-oriented workflows.
