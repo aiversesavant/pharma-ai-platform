@@ -1,0 +1,17 @@
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+.env
+
+uploaded_docs/
+temp_uploads/
+data/uploads/
+data/audit/
+data/review/
+
+chroma_db/
+chroma_store/
+
+.streamlit/
