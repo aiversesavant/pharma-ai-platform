@@ -10,7 +10,7 @@ def get_platform_health() -> Dict[str, object]:
     upload_dir_exists = os.path.exists("data/uploads")
     audit_dir_exists = os.path.exists("data/audit")
     review_dir_exists = os.path.exists("data/review")
-    chroma_dir_exists = os.path.exists("chroma_db")
+    chroma_dir_exists = os.path.exists("data/runtime/vector_store/chroma_db")
     env_exists = os.path.exists(".env")
 
     checks = {

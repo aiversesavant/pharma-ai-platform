@@ -12,7 +12,7 @@ from services.llm_client import generate_text
 from services.llm_config import llm_is_configured
 
 
-CHROMA_PATH = "chroma_db"
+CHROMA_PATH = "data/runtime/vector_store/chroma_db"
 COLLECTION_NAME = "complibot_docs"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 

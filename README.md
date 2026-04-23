@@ -169,4 +169,4 @@ pharma-ai-platform/
 │   ├── uploads/
 │   ├── audit/
 │   └── review/
-└── chroma_db/
+└── data/runtime/vector_store/chroma_db/

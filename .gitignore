@@ -1,17 +1,24 @@
 venv/
+.venv/
 __pycache__/
 *.pyc
 .DS_Store
 
 .env
+.env.local
+.env.*.local
 
 uploaded_docs/
 temp_uploads/
+
 data/uploads/
 data/audit/
 data/review/
+data/runtime/vector_store/
 
-chroma_db/
-chroma_store/
+logs/
 
 .streamlit/
+.pytest_cache/
+.coverage
+htmlcov/
