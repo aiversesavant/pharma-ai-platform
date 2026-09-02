@@ -65,6 +65,27 @@ BODY_START_HINTS = [
     "responsibilities",
 ]
 
+REVISION_HISTORY_PATTERNS = [
+    "draft revision",
+    "date for coming into effect",
+    "final adoption",
+    "agreed by",
+    "adopted by",
+    "public consultation",
+    "start of public consultation",
+    "end of consultation",
+    "this revision of the module",
+    "revision 2 contains the following",
+    "changes are integrated directly",
+    "document history",
+    "regulatory history",
+    "current e6(r2) addendum",
+    "approval by the cpmp",
+    "step 5 corrected version",
+    "codification",
+]
+
+
 SECTION_HINTS = {
     "Purpose": ["purpose", "objective", "aim"],
     "Scope": ["scope", "applies to", "application"],
@@ -124,6 +145,14 @@ def is_noise_line(line: str) -> bool:
     if not lowered:
         return True
     return any(pattern in lowered for pattern in NOISE_PATTERNS)
+
+
+def is_revision_history_sentence(sentence: str) -> bool:
+    lowered = sentence.lower()
+    return any(
+        pattern in lowered
+        for pattern in REVISION_HISTORY_PATTERNS
+    )
 
 
 def normalize_sentence(sentence: str) -> str:
@@ -197,6 +226,8 @@ def find_body_sentences(text: str) -> List[str]:
         if any(pattern in lowered for pattern in NOISE_PATTERNS):
             continue
 
+        if is_revision_history_sentence(sentence):
+            continue
         if len(sentence) < 50:
             continue
 
@@ -207,7 +238,16 @@ def find_body_sentences(text: str) -> List[str]:
             meaningful.append(sentence)
 
     if not meaningful:
-        meaningful = [s for s in sentences if len(s) >= 50]
+        meaningful = [
+            sentence
+            for sentence in sentences
+            if len(sentence) >= 50
+            and not any(
+                pattern in sentence.lower()
+                for pattern in NOISE_PATTERNS
+            )
+            and not is_revision_history_sentence(sentence)
+        ]
 
     return meaningful
 
